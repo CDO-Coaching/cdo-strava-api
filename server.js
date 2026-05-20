@@ -106,7 +106,7 @@ app.get("/auth/strava/callback", async (req, res) => {
   const { code, state, error } = req.query;
 
   if (error) {
-    return res.redirect(`${FRONTEND_URL}/athlete/profil?strava=error`);
+    return res.redirect(`${FRONTEND_URL}/sportif/profil?strava=error`);
   }
 
   if (!code || !state) {
@@ -129,7 +129,7 @@ app.get("/auth/strava/callback", async (req, res) => {
 
     if (!tokenData.access_token) {
       console.error("Strava token error:", tokenData);
-      return res.redirect(`${FRONTEND_URL}/athlete/profil?strava=error`);
+      return res.redirect(`${FRONTEND_URL}/sportif/profil?strava=error`);
     }
 
     // state = athlete_id (UUID Supabase) passé par le frontend
@@ -156,10 +156,10 @@ app.get("/auth/strava/callback", async (req, res) => {
       await importActivity(act.id, athleteId, tokenData.access_token);
     }
 
-    res.redirect(`${FRONTEND_URL}/athlete/profil?strava=connected`);
+    res.redirect(`${FRONTEND_URL}/sportif/profil?strava=connected`);
   } catch (err) {
     console.error("OAuth callback error:", err);
-    res.redirect(`${FRONTEND_URL}/athlete/profil?strava=error`);
+    res.redirect(`${FRONTEND_URL}/sportif/profil?strava=error`);
   }
 });
 
