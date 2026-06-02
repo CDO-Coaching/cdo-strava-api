@@ -299,37 +299,34 @@ app.post("/strava/sync/:athleteId", async (req, res) => {
       imported++;
     }
 
-    // Mise à jour des session_exercises déjà liées avec les nouvelles données
-    const { data: linkedExercises } = await supabase
-      .from("session_exercises")
-      .select("id, linked_strava_activity_id")
-      .eq("sportif_id", athleteId)
-      .not("linked_strava_activity_id", "is", null);
+    // Mise à jour des session_exercises déjà liées — on passe par strava_activities
+    // (session_exercises n'a pas de colonne sportif_id, on filtre via athlete_id sur strava_activities)
+    const { data: athleteActivities } = await supabase
+      .from("strava_activities")
+      .select("strava_activity_id, average_heartrate, max_heartrate, average_cadence, total_elevation_gain, calories, heart_rate_zones")
+      .eq("athlete_id", athleteId);
 
     let updated = 0;
-    for (const ex of linkedExercises || []) {
-      const { data: stravaAct } = await supabase
-        .from("strava_activities")
-        .select("average_heartrate, max_heartrate, average_cadence, total_elevation_gain, calories, heart_rate_zones")
-        .eq("strava_activity_id", ex.linked_strava_activity_id)
-        .eq("athlete_id", athleteId)
-        .single();
-
-      if (!stravaAct) continue;
-
-      await supabase
+    for (const stravaAct of athleteActivities || []) {
+      const { data: exRows } = await supabase
         .from("session_exercises")
-        .update({
-          actual_avg_heart_rate: stravaAct.average_heartrate ? Math.round(stravaAct.average_heartrate) : null,
-          actual_max_heart_rate: stravaAct.max_heartrate ? Math.round(stravaAct.max_heartrate) : null,
-          actual_cadence: stravaAct.average_cadence ?? null,
-          actual_elevation_gain: stravaAct.total_elevation_gain ?? null,
-          actual_calories: stravaAct.calories ?? null,
-          actual_heart_rate_zones: stravaAct.heart_rate_zones ?? null,
-        })
-        .eq("id", ex.id);
+        .select("id")
+        .eq("linked_strava_activity_id", stravaAct.strava_activity_id);
 
-      updated++;
+      for (const ex of exRows || []) {
+        await supabase
+          .from("session_exercises")
+          .update({
+            actual_avg_heart_rate: stravaAct.average_heartrate ? Math.round(stravaAct.average_heartrate) : null,
+            actual_max_heart_rate: stravaAct.max_heartrate ? Math.round(stravaAct.max_heartrate) : null,
+            actual_cadence: stravaAct.average_cadence ?? null,
+            actual_elevation_gain: stravaAct.total_elevation_gain ?? null,
+            actual_calories: stravaAct.calories ?? null,
+            actual_heart_rate_zones: stravaAct.heart_rate_zones ?? null,
+          })
+          .eq("id", ex.id);
+        updated++;
+      }
     }
 
     console.log(`🔄 Sync manuel : ${imported} activités importées, ${updated} séances mises à jour pour ${athleteId}`);
