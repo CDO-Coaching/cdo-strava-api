@@ -223,6 +223,39 @@ app.delete("/strava/disconnect/:athleteId", async (req, res) => {
   res.json({ success: true });
 });
 
+// 6. Sync manuel — récupère les 30 dernières activités depuis Strava
+app.post("/strava/sync/:athleteId", async (req, res) => {
+  const { athleteId } = req.params;
+  try {
+    const accessToken = await getValidToken(athleteId);
+    if (!accessToken) {
+      return res.status(401).json({ error: "Token Strava invalide ou expiré" });
+    }
+
+    const activitiesRes = await fetch(
+      "https://www.strava.com/api/v3/athlete/activities?per_page=30",
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const activities = await activitiesRes.json();
+
+    if (!Array.isArray(activities)) {
+      return res.status(500).json({ error: "Réponse Strava invalide", detail: activities });
+    }
+
+    let imported = 0;
+    for (const act of activities) {
+      await importActivity(act.id, athleteId, accessToken);
+      imported++;
+    }
+
+    console.log(`🔄 Sync manuel : ${imported} activités importées pour ${athleteId}`);
+    res.json({ success: true, imported });
+  } catch (err) {
+    console.error("Sync error:", err);
+    res.status(500).json({ error: "Erreur lors de la synchronisation" });
+  }
+});
+
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`🚀 CDO Strava API running on port ${PORT}`));
