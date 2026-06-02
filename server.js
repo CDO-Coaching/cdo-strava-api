@@ -80,9 +80,36 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
   const CARDIO_TYPES = ["Run", "TrailRun", "Walk", "Hike", "Ride", "Swim", "VirtualRun"];
   if (!CARDIO_TYPES.includes(activity.sport_type)) return;
 
-  // Récupère les zones FC si l'activité a de la data cardiaque
+  // Calcule les zones FC depuis les splits (FC moy par km × durée)
+  // Zones basées sur % FC max : Z1<60%, Z2 60-70%, Z3 70-80%, Z4 80-90%, Z5>90%
   let heartRateZones = null;
-  if (activity.average_heartrate) {
+  if (activity.average_heartrate && activity.max_heartrate && activity.splits_metric?.length) {
+    const maxHr = activity.max_heartrate;
+    const zoneLimits = [0, 0.60, 0.70, 0.80, 0.90, 1.10]; // bornes en % FC max
+    const timeInZone = [0, 0, 0, 0, 0]; // Z1..Z5 en secondes
+
+    for (const split of activity.splits_metric) {
+      const hr = split.average_heartrate;
+      const t  = split.moving_time;
+      if (!hr || !t) continue;
+      const pct = hr / maxHr;
+      const zIdx = zoneLimits.findIndex((lim, i) => pct < zoneLimits[i + 1]) - 1;
+      const z = Math.max(0, Math.min(4, zIdx < 0 ? 4 : zIdx));
+      timeInZone[z] += t;
+    }
+
+    heartRateZones = timeInZone.map((t, i) => ({
+      zone: i + 1,
+      min: Math.round(maxHr * zoneLimits[i]),
+      max: i < 4 ? Math.round(maxHr * zoneLimits[i + 1]) : -1,
+      time_seconds: Math.round(t),
+    })).filter(z => z.time_seconds > 0);
+
+    if (!heartRateZones.length) heartRateZones = null;
+  }
+
+  // Fallback : essaie l'endpoint /zones de Strava si pas de zones calculées
+  if (!heartRateZones && activity.average_heartrate) {
     try {
       const zonesRes = await fetch(`https://www.strava.com/api/v3/activities/${stravaActivityId}/zones`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -91,16 +118,11 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
         const zonesData = await zonesRes.json();
         if (zonesData.heart_rate?.zones?.length) {
           heartRateZones = zonesData.heart_rate.zones.map((z, i) => ({
-            zone: i + 1,
-            min: z.min,
-            max: z.max,
-            time_seconds: z.time,
-          }));
+            zone: i + 1, min: z.min, max: z.max, time_seconds: z.time,
+          })).filter(z => z.time_seconds > 0);
         }
       }
-    } catch (e) {
-      console.warn(`Zones FC non disponibles pour activité ${stravaActivityId}:`, e.message);
-    }
+    } catch (e) { /* silencieux */ }
   }
 
   await supabase.from("strava_activities").upsert({
