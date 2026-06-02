@@ -89,9 +89,14 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
     distance_meters: activity.distance,
     moving_time_seconds: activity.moving_time,
     average_speed_ms: activity.average_speed,
+    max_speed_ms: activity.max_speed || null,
     average_heartrate: activity.average_heartrate || null,
     max_heartrate: activity.max_heartrate || null,
     total_elevation_gain: activity.total_elevation_gain || 0,
+    average_cadence: activity.average_cadence || null,
+    calories: activity.calories || null,
+    suffer_score: activity.suffer_score || null,
+    average_watts: activity.average_watts || null,
     splits_metric: activity.splits_metric || null,
   }, { onConflict: "strava_activity_id" });
 }
