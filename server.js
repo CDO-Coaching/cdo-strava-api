@@ -80,6 +80,29 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
   const CARDIO_TYPES = ["Run", "TrailRun", "Walk", "Hike", "Ride", "Swim", "VirtualRun"];
   if (!CARDIO_TYPES.includes(activity.sport_type)) return;
 
+  // Récupère les zones FC si l'activité a de la data cardiaque
+  let heartRateZones = null;
+  if (activity.average_heartrate) {
+    try {
+      const zonesRes = await fetch(`https://www.strava.com/api/v3/activities/${stravaActivityId}/zones`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (zonesRes.ok) {
+        const zonesData = await zonesRes.json();
+        if (zonesData.heart_rate?.zones?.length) {
+          heartRateZones = zonesData.heart_rate.zones.map((z, i) => ({
+            zone: i + 1,
+            min: z.min,
+            max: z.max,
+            time_seconds: z.time,
+          }));
+        }
+      }
+    } catch (e) {
+      console.warn(`Zones FC non disponibles pour activité ${stravaActivityId}:`, e.message);
+    }
+  }
+
   await supabase.from("strava_activities").upsert({
     athlete_id: athleteId,
     strava_activity_id: activity.id,
@@ -97,6 +120,7 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
     calories: activity.calories || null,
     suffer_score: activity.suffer_score || null,
     average_watts: activity.average_watts || null,
+    heart_rate_zones: heartRateZones,
     splits_metric: activity.splits_metric || null,
   }, { onConflict: "strava_activity_id" });
 }
