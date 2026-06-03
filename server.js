@@ -80,9 +80,15 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
   const CARDIO_TYPES = ["Run", "TrailRun", "Walk", "Hike", "Ride", "Swim", "VirtualRun"];
   if (!CARDIO_TYPES.includes(activity.sport_type)) return;
 
-  // Étape 1 : zones depuis l'endpoint Strava /zones (données Garmin seconde par seconde — priorité maximale)
+  // ── Calcul des zones FC ──────────────────────────────────────────────────
+  // Priorité 1 : endpoint /activities/{id}/zones de Strava (fournit les zones Garmin précises)
+  // Priorité 2 : stream HR seconde par seconde (précis mais coût +1 appel API)
+  // Priorité 3 : splits par km (approximatif — FC moyenne lisse les pics)
   let heartRateZones = null;
+
   if (activity.average_heartrate) {
+
+    // ── Priorité 1 : zones Strava ──
     try {
       const zonesRes = await fetch(`https://www.strava.com/api/v3/activities/${stravaActivityId}/zones`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -94,40 +100,77 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
             .map((z, i) => ({ zone: i + 1, min: z.min, max: z.max, time_seconds: z.time }))
             .filter(z => z.time_seconds > 0);
           if (parsed.length > 0) {
-            heartRateZones = parsed; // ✅ données précises Garmin
-            console.log(`✅ Zones Strava/Garmin pour activité ${stravaActivityId}: ${parsed.length} zones`);
+            heartRateZones = parsed;
+            console.log(`✅ [P1-Zones] Activité ${stravaActivityId}: ${parsed.length} zones depuis Strava`);
+          } else {
+            console.log(`ℹ️  [P1-Zones] Activité ${stravaActivityId}: zones vides (FC max non configurée dans Strava ?)`);
           }
         }
       }
-    } catch (e) { console.warn(`Zones endpoint failed for ${stravaActivityId}:`, e.message); }
-  }
+    } catch (e) { console.warn(`[P1-Zones] Échec pour ${stravaActivityId}:`, e.message); }
 
-  // Étape 2 : fallback — calcul depuis les splits si Strava n'a pas fourni de zones
-  // ⚠️  Moins précis : utilise la FC MOYENNE par km → lisse les pics → zones décalées d'un rang vers le bas
-  if (!heartRateZones && activity.average_heartrate && activity.max_heartrate && activity.splits_metric?.length) {
-    console.log(`⚠️  Fallback splits pour activité ${stravaActivityId} (zones Strava indisponibles)`);
-    const maxHr = activity.max_heartrate;
-    const zoneLimits = [0, 0.60, 0.70, 0.80, 0.90, 1.10];
-    const timeInZone = [0, 0, 0, 0, 0];
-
-    for (const split of activity.splits_metric) {
-      const hr = split.average_heartrate;
-      const t  = split.moving_time;
-      if (!hr || !t) continue;
-      const pct = hr / maxHr;
-      const zIdx = zoneLimits.findIndex((lim, i) => pct < zoneLimits[i + 1]) - 1;
-      const z = Math.max(0, Math.min(4, zIdx < 0 ? 4 : zIdx));
-      timeInZone[z] += t;
+    // ── Priorité 2 : stream HR seconde par seconde ──
+    if (!heartRateZones && activity.max_heartrate) {
+      try {
+        const streamRes = await fetch(
+          `https://www.strava.com/api/v3/activities/${stravaActivityId}/streams?keys=heartrate,time&key_by_type=true`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (streamRes.ok) {
+          const streamData = await streamRes.json();
+          const hrData  = streamData.heartrate?.data;
+          const timeData = streamData.time?.data;
+          if (hrData?.length > 1 && timeData?.length > 1) {
+            const maxHr = activity.max_heartrate;
+            const zoneLimits = [0, 0.60, 0.70, 0.80, 0.90, 1.10];
+            const timeInZone = [0, 0, 0, 0, 0];
+            for (let i = 1; i < hrData.length; i++) {
+              const hr = hrData[i];
+              const dt = timeData[i] - timeData[i - 1]; // secondes réelles
+              if (!hr || dt <= 0 || dt > 60) continue; // ignorer les gaps
+              const pct = hr / maxHr;
+              const zIdx = zoneLimits.findIndex((_, j) => pct < zoneLimits[j + 1]) - 1;
+              const z = Math.max(0, Math.min(4, zIdx < 0 ? 4 : zIdx));
+              timeInZone[z] += dt;
+            }
+            const parsed = timeInZone.map((t, i) => ({
+              zone: i + 1,
+              min: Math.round(maxHr * zoneLimits[i]),
+              max: i < 4 ? Math.round(maxHr * zoneLimits[i + 1]) : -1,
+              time_seconds: Math.round(t),
+            })).filter(z => z.time_seconds > 0);
+            if (parsed.length > 0) {
+              heartRateZones = parsed;
+              console.log(`✅ [P2-Stream] Activité ${stravaActivityId}: ${parsed.length} zones depuis stream HR (${hrData.length} points)`);
+            }
+          }
+        }
+      } catch (e) { console.warn(`[P2-Stream] Échec pour ${stravaActivityId}:`, e.message); }
     }
 
-    heartRateZones = timeInZone.map((t, i) => ({
-      zone: i + 1,
-      min: Math.round(maxHr * zoneLimits[i]),
-      max: i < 4 ? Math.round(maxHr * zoneLimits[i + 1]) : -1,
-      time_seconds: Math.round(t),
-    })).filter(z => z.time_seconds > 0);
-
-    if (!heartRateZones.length) heartRateZones = null;
+    // ── Priorité 3 : splits par km (fallback approximatif) ──
+    if (!heartRateZones && activity.max_heartrate && activity.splits_metric?.length) {
+      console.log(`⚠️  [P3-Splits] Activité ${stravaActivityId}: zones approximatives depuis splits`);
+      const maxHr = activity.max_heartrate;
+      const zoneLimits = [0, 0.60, 0.70, 0.80, 0.90, 1.10];
+      const timeInZone = [0, 0, 0, 0, 0];
+      for (const split of activity.splits_metric) {
+        const hr = split.average_heartrate;
+        const t  = split.moving_time;
+        if (!hr || !t) continue;
+        const pct = hr / maxHr;
+        const zIdx = zoneLimits.findIndex((_, i) => pct < zoneLimits[i + 1]) - 1;
+        const z = Math.max(0, Math.min(4, zIdx < 0 ? 4 : zIdx));
+        timeInZone[z] += t;
+      }
+      const parsed = timeInZone.map((t, i) => ({
+        zone: i + 1,
+        min: Math.round(maxHr * zoneLimits[i]),
+        max: i < 4 ? Math.round(maxHr * zoneLimits[i + 1]) : -1,
+        time_seconds: Math.round(t),
+      })).filter(z => z.time_seconds > 0);
+      if (parsed.length > 0) heartRateZones = parsed;
+    }
   }
 
   await supabase.from("strava_activities").upsert({
@@ -277,6 +320,59 @@ app.get("/strava/status/:athleteId", async (req, res) => {
 app.delete("/strava/disconnect/:athleteId", async (req, res) => {
   await supabase.from("strava_tokens").delete().eq("athlete_id", req.params.athleteId);
   res.json({ success: true });
+});
+
+// 6b. Diagnostic — vérifie ce que Strava retourne pour les zones d'une activité
+app.get("/strava/debug-zones/:athleteId/:activityId", async (req, res) => {
+  const { athleteId, activityId } = req.params;
+  try {
+    const accessToken = await getValidToken(athleteId);
+    if (!accessToken) return res.status(401).json({ error: "Token invalide" });
+
+    // Test endpoint zones
+    const zonesRes = await fetch(`https://www.strava.com/api/v3/activities/${activityId}/zones`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const zonesData = zonesRes.ok ? await zonesRes.json() : { error: `HTTP ${zonesRes.status}` };
+
+    // Test stream HR
+    const streamRes = await fetch(
+      `https://www.strava.com/api/v3/activities/${activityId}/streams?keys=heartrate,time&key_by_type=true`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const streamData = streamRes.ok ? await streamRes.json() : { error: `HTTP ${streamRes.status}` };
+    const hrPoints = streamData.heartrate?.data?.length ?? 0;
+    const hrSample = streamData.heartrate?.data?.slice(0, 10) ?? [];
+
+    // Données actuelles en DB
+    const { data: dbActivity } = await supabase
+      .from("strava_activities")
+      .select("heart_rate_zones, max_heartrate, splits_metric")
+      .eq("strava_activity_id", activityId)
+      .single();
+
+    res.json({
+      strava_zones_endpoint: {
+        status: zonesRes.status,
+        has_heart_rate: !!zonesData.heart_rate,
+        zones_with_time: zonesData.heart_rate?.zones?.filter(z => z.time > 0)?.length ?? 0,
+        raw: zonesData.heart_rate?.zones ?? null,
+      },
+      strava_stream_hr: {
+        status: streamRes.status,
+        total_points: hrPoints,
+        sample_first_10_bpm: hrSample,
+        available: hrPoints > 0,
+      },
+      db_current: {
+        heart_rate_zones: dbActivity?.heart_rate_zones ?? null,
+        max_heartrate: dbActivity?.max_heartrate ?? null,
+        splits_count: dbActivity?.splits_metric?.length ?? 0,
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 6. Sync manuel — récupère les 30 dernières activités depuis Strava
