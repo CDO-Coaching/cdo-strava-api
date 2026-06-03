@@ -322,6 +322,18 @@ app.delete("/strava/disconnect/:athleteId", async (req, res) => {
   res.json({ success: true });
 });
 
+// 6a. Liste les activités récentes d'un athlète (pour trouver les IDs)
+app.get("/strava/activities/:athleteId", async (req, res) => {
+  const { athleteId } = req.params;
+  const { data } = await supabase
+    .from("strava_activities")
+    .select("strava_activity_id, name, sport_type, start_date, moving_time_seconds, distance_meters, heart_rate_zones")
+    .eq("athlete_id", athleteId)
+    .order("start_date", { ascending: false })
+    .limit(20);
+  res.json(data || []);
+});
+
 // 6b. Diagnostic — vérifie ce que Strava retourne pour les zones d'une activité
 app.get("/strava/debug-zones/:athleteId/:activityId", async (req, res) => {
   const { athleteId, activityId } = req.params;
