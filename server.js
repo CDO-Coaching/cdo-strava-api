@@ -469,6 +469,22 @@ app.post("/strava/sync/:athleteId", async (req, res) => {
       }
     }
 
+    // Mettre à jour les custom_sessions liées via strava_activity_id
+    for (const stravaAct of athleteActivities || []) {
+      if (!stravaAct.heart_rate_zones) continue;
+      await supabase
+        .from("custom_sessions")
+        .update({
+          heart_rate_zones: stravaAct.heart_rate_zones,
+          max_heart_rate: stravaAct.max_heartrate ? Math.round(stravaAct.max_heartrate) : null,
+          cadence: stravaAct.average_cadence ?? null,
+          calories: stravaAct.calories ?? null,
+          elevation_gain: stravaAct.total_elevation_gain ?? null,
+        })
+        .eq("strava_activity_id", stravaAct.strava_activity_id)
+        .eq("user_id", athleteId);
+    }
+
     console.log(`🔄 Sync manuel : ${imported} activités importées, ${updated} séances mises à jour pour ${athleteId}`);
     res.json({ success: true, imported, updated });
   } catch (err) {
