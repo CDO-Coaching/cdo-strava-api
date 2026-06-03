@@ -135,7 +135,9 @@ async function importActivity(stravaActivityId, athleteId, accessToken, athleteF
               const dt = timeData[i] - timeData[i - 1];
               if (!hr || dt <= 0 || dt > 60) continue;
               const pct = hr / maxHr;
-              const zIdx = zoneLimits.findIndex((_, j) => pct < zoneLimits[j + 1]) - 1;
+              // findIndex retourne j tel que pct < zoneLimits[j+1]
+              // ex: pct=0.85 → j=3 (0.85 < 0.90) → Z4 (index 3) ✓
+              const zIdx = zoneLimits.findIndex((_, j) => pct < zoneLimits[j + 1]);
               const z = Math.max(0, Math.min(4, zIdx < 0 ? 4 : zIdx));
               timeInZone[z] += dt;
             }
@@ -165,7 +167,7 @@ async function importActivity(stravaActivityId, athleteId, accessToken, athleteF
         const t  = split.moving_time;
         if (!hr || !t) continue;
         const pct = hr / maxHr;
-        const zIdx = zoneLimits.findIndex((_, i) => pct < zoneLimits[i + 1]) - 1;
+        const zIdx = zoneLimits.findIndex((_, i) => pct < zoneLimits[i + 1]);
         const z = Math.max(0, Math.min(4, zIdx < 0 ? 4 : zIdx));
         timeInZone[z] += t;
       }
