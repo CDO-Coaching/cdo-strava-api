@@ -67,7 +67,7 @@ async function getValidToken(athleteId) {
   return token.access_token;
 }
 
-async function importActivity(stravaActivityId, athleteId, accessToken) {
+async function importActivity(stravaActivityId, athleteId, accessToken, athleteFcMax = null) {
   // Récupère les détails de l'activité depuis Strava
   const res = await fetch(`https://www.strava.com/api/v3/activities/${stravaActivityId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -80,9 +80,15 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
   const CARDIO_TYPES = ["Run", "TrailRun", "Walk", "Hike", "Ride", "Swim", "VirtualRun"];
   if (!CARDIO_TYPES.includes(activity.sport_type)) return;
 
+  // FC max de référence pour les zones :
+  // 1. FC max configurée dans l'app CDO (stable, testée) — priorité
+  // 2. FC max enregistrée pendant la session Strava (variable, peut sous-estimer)
+  const refFcMax = athleteFcMax || activity.max_heartrate || null;
+  console.log(`📊 FC max référence pour ${stravaActivityId}: app=${athleteFcMax} session=${activity.max_heartrate} → utilisée=${refFcMax}`);
+
   // ── Calcul des zones FC ──────────────────────────────────────────────────
   // Priorité 1 : endpoint /activities/{id}/zones de Strava (fournit les zones Garmin précises)
-  // Priorité 2 : stream HR seconde par seconde (précis mais coût +1 appel API)
+  // Priorité 2 : stream HR seconde par seconde + FC max app (précis, bornes cohérentes)
   // Priorité 3 : splits par km (approximatif — FC moyenne lisse les pics)
   let heartRateZones = null;
 
@@ -109,8 +115,8 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
       }
     } catch (e) { console.warn(`[P1-Zones] Échec pour ${stravaActivityId}:`, e.message); }
 
-    // ── Priorité 2 : stream HR seconde par seconde ──
-    if (!heartRateZones && activity.max_heartrate) {
+    // ── Priorité 2 : stream HR seconde par seconde + FC max app ──
+    if (!heartRateZones && refFcMax) {
       try {
         const streamRes = await fetch(
           `https://www.strava.com/api/v3/activities/${stravaActivityId}/streams?keys=heartrate,time&key_by_type=true`,
@@ -121,13 +127,13 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
           const hrData  = streamData.heartrate?.data;
           const timeData = streamData.time?.data;
           if (hrData?.length > 1 && timeData?.length > 1) {
-            const maxHr = activity.max_heartrate;
+            const maxHr = refFcMax; // ✅ FC max app (stable) ou session
             const zoneLimits = [0, 0.60, 0.70, 0.80, 0.90, 1.10];
             const timeInZone = [0, 0, 0, 0, 0];
             for (let i = 1; i < hrData.length; i++) {
               const hr = hrData[i];
-              const dt = timeData[i] - timeData[i - 1]; // secondes réelles
-              if (!hr || dt <= 0 || dt > 60) continue; // ignorer les gaps
+              const dt = timeData[i] - timeData[i - 1];
+              if (!hr || dt <= 0 || dt > 60) continue;
               const pct = hr / maxHr;
               const zIdx = zoneLimits.findIndex((_, j) => pct < zoneLimits[j + 1]) - 1;
               const z = Math.max(0, Math.min(4, zIdx < 0 ? 4 : zIdx));
@@ -141,7 +147,7 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
             })).filter(z => z.time_seconds > 0);
             if (parsed.length > 0) {
               heartRateZones = parsed;
-              console.log(`✅ [P2-Stream] Activité ${stravaActivityId}: ${parsed.length} zones depuis stream HR (${hrData.length} points)`);
+              console.log(`✅ [P2-Stream] ${stravaActivityId}: ${parsed.length} zones (FC max ref: ${maxHr}, ${hrData.length} points)`);
             }
           }
         }
@@ -149,9 +155,9 @@ async function importActivity(stravaActivityId, athleteId, accessToken) {
     }
 
     // ── Priorité 3 : splits par km (fallback approximatif) ──
-    if (!heartRateZones && activity.max_heartrate && activity.splits_metric?.length) {
-      console.log(`⚠️  [P3-Splits] Activité ${stravaActivityId}: zones approximatives depuis splits`);
-      const maxHr = activity.max_heartrate;
+    if (!heartRateZones && refFcMax && activity.splits_metric?.length) {
+      console.log(`⚠️  [P3-Splits] ${stravaActivityId}: zones approximatives depuis splits (FC max ref: ${refFcMax})`);
+      const maxHr = refFcMax;
       const zoneLimits = [0, 0.60, 0.70, 0.80, 0.90, 1.10];
       const timeInZone = [0, 0, 0, 0, 0];
       for (const split of activity.splits_metric) {
@@ -298,8 +304,16 @@ app.post("/webhooks/strava", async (req, res) => {
     const accessToken = await getValidToken(tokenRow.athlete_id);
     if (!accessToken) return;
 
-    await importActivity(object_id, tokenRow.athlete_id, accessToken);
-    console.log(`✅ Activité ${object_id} importée pour l'athlète ${tokenRow.athlete_id}`);
+    // Récupère la FC max de l'app pour cet athlète
+    const { data: profileData } = await supabase
+      .from("user_profiles")
+      .select("fc_max")
+      .eq("id", tokenRow.athlete_id)
+      .single();
+    const athleteFcMax = profileData?.fc_max || null;
+
+    await importActivity(object_id, tokenRow.athlete_id, accessToken, athleteFcMax);
+    console.log(`✅ Activité ${object_id} importée pour l'athlète ${tokenRow.athlete_id} (FC max: ${athleteFcMax})`);
   } catch (err) {
     console.error("Webhook processing error:", err);
   }
@@ -396,6 +410,17 @@ app.post("/strava/sync/:athleteId", async (req, res) => {
       return res.status(401).json({ error: "Token Strava invalide ou expiré" });
     }
 
+    // Récupère la FC max configurée dans l'app CDO pour cet athlète
+    const { data: profileData } = await supabase
+      .from("user_profiles")
+      .select("fc_max")
+      .eq("id", athleteId)
+      .single();
+    const athleteFcMax = profileData?.fc_max || null;
+    if (athleteFcMax) {
+      console.log(`💓 FC max CDO pour ${athleteId}: ${athleteFcMax} bpm (utilisée comme référence zones)`);
+    }
+
     const activitiesRes = await fetch(
       "https://www.strava.com/api/v3/athlete/activities?per_page=30",
       { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -408,7 +433,7 @@ app.post("/strava/sync/:athleteId", async (req, res) => {
 
     let imported = 0;
     for (const act of activities) {
-      await importActivity(act.id, athleteId, accessToken);
+      await importActivity(act.id, athleteId, accessToken, athleteFcMax);
       imported++;
     }
 
